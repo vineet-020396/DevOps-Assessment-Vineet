@@ -19,6 +19,11 @@ jobs:
       - name: Log in to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
+        with:
+          # Use GitHub Secrets for AWS credentials
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          region: ${{ secrets.AWS_REGION }}  # Optionally, if you want to specify the region
 
       - name: Build, tag, and push Notification API image to ECR
         env:
@@ -28,6 +33,7 @@ jobs:
         run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
       - name: Build, tag, and push Email Sender image to ECR
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -36,12 +42,17 @@ jobs:
         run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
       - name: Update ECS service
         env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}  # Ensure the region is set if not using default
           CLUSTER_NAME: notification-cluster
           SERVICE_NAME: notification-api-service
           TASK_FAMILY: notification-api
           CONTAINER_NAME: notification-api
         run: |
-          TASK_DEFINITION_ARN=$(aws ecs describe-task-definition --task-definition $TASK_FAMILY --query "taskDefinition.taskDefinitionArn" --output text)
-          aws ecs update-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --force-new-deployment --task-definition $TASK_DEFINITION_ARN
+          TASK_DEFINITION=$(aws ecs describe-task-definition --task-definition $TASK_FAMILY)
+          NEW_TASK_DEFINITION=$(echo $TASK_DEFINITION | jq '.taskDefinition | .containerDefinitions[0].image = "'$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG'"')
+          NEW_TASK_DEFINITION_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$(echo $NEW_TASK_DEFINITION | jq '{containerDefinitions, family, taskRoleArn, executionRoleArn, networkMode, volumes, placementConstraints, requiresCompatibilities, cpu, memory}')")
+          aws ecs update-service --cluster $CLUSTER_NAME --service $SERVICE_NAME --force-new-deployment --task-definition $(echo $NEW_TASK_DEFINITION_ARN | jq -r '.taskDefinition.taskDefinitionArn')
